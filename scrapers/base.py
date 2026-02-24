@@ -51,6 +51,24 @@ logger = logging.getLogger(__name__)
 # Each scraper module registers: brand_key -> callable that returns list[dict]
 _REGISTRY: dict[str, Any] = {}
 
+# Brands that need Playwright (headless browser); on Streamlit Cloud they won't run
+_PLAYWRIGHT_BRANDS = {"skims", "honeylove"}
+
+
+def _is_playwright_available() -> bool:
+    """True if Playwright is installed and Chromium is available (e.g. when running locally). False on Streamlit Cloud."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception:
+        return False
+
 
 def register(brand_key: str):
     """Decorator to register a scraper function for a brand key."""
@@ -73,25 +91,44 @@ def scrape_brand(brand_key: str) -> list[dict]:
     return fn()
 
 
-def run_all_scrapers(save: bool = True) -> tuple[list[dict], int, int]:
+def run_all_scrapers(save: bool = True) -> dict:
     """
     Run all registered scrapers, optionally persist to DB.
-    Returns (all_items, total_products_updated, total_price_records_inserted).
+    On cloud (no Playwright), only Spanx runs; SKIMS and Honeylove are skipped.
+    Returns dict with: items, products_updated, price_records_inserted, per_brand, cloud_only_spanx.
     """
     all_items: list[dict] = []
+    per_brand: dict[str, tuple[int, Any]] = {}  # brand -> (count, error_message or None)
+    playwright_ok = _is_playwright_available()
+    cloud_only_spanx = False
     for key in config.BRAND_KEYS:
         if key not in _REGISTRY:
             logger.warning("No scraper registered for brand %s, skipping", key)
+            per_brand[key] = (0, "Not registered")
+            continue
+        if key in _PLAYWRIGHT_BRANDS and not playwright_ok:
+            per_brand[key] = (0, "Playwright not available (run locally for this brand)")
+            logger.warning("Skipping %s: Playwright not available", key)
+            cloud_only_spanx = True
             continue
         try:
             items = scrape_brand(key)
             all_items.extend(items)
+            per_brand[key] = (len(items), None)
             logger.info("Scraper %s returned %d items", key, len(items))
         except Exception as e:
+            err_msg = str(e)
+            per_brand[key] = (0, err_msg)
             logger.exception("Scraper %s failed: %s", key, e)
     products_updated = 0
     price_records_inserted = 0
     if save and all_items:
         init_db()
         products_updated, price_records_inserted = save_scrape_results(all_items)
-    return all_items, products_updated, price_records_inserted
+    return {
+        "items": all_items,
+        "products_updated": products_updated,
+        "price_records_inserted": price_records_inserted,
+        "per_brand": per_brand,
+        "cloud_only_spanx": cloud_only_spanx,
+    }

@@ -2,11 +2,22 @@
 Shapermint competitor price datascraper – Streamlit UI.
 Run with: streamlit run app.py
 """
+import os
 import streamlit as st
 
-from db import init_db
+# So config and db use cloud DB when deployed (Streamlit Secrets → os.environ)
+try:
+    for key in ("DATABASE_URL", "SCRAPE_PASSWORD"):
+        v = getattr(st.secrets, key, None) or (st.secrets.get(key) if hasattr(st.secrets, "get") else None)
+        if v:
+            os.environ[key] = str(v)
+except Exception:
+    pass
+
+from db import init_db, is_using_sqlite_fallback
 from db.read import (
     get_current_prices,
+    get_last_scrape_at,
     get_price_history,
     get_products_for_selector,
     get_brand_names,
@@ -20,6 +31,9 @@ st.set_page_config(
     layout="wide",
 )
 
+# Connect to DB: use Supabase if reachable, otherwise fall back to local SQLite (e.g. when run from Cursor with no network).
+init_db()
+
 # Admin access: only users who know the password can run scrapes (when SCRAPE_PASSWORD is set)
 def _get_scrape_password():
     try:
@@ -31,83 +45,222 @@ if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
 with st.sidebar:
-    st.markdown("## About this tool")
-    st.markdown(
-        "This dashboard shows **shapewear prices** from Shapermint's main competitors "
-        "(Spanx, SKIMS, Honeylove). Use the tabs to view current prices, "
-        "filter by brand or category, and see price history over time."
-    )
-    scrape_password = _get_scrape_password()
-    if scrape_password:
-        st.markdown("---")
-        st.markdown("### Admin (update data)")
-        if st.session_state.is_admin:
-            st.success("Logged in as admin.")
-            if st.button("Log out"):
-                st.session_state.is_admin = False
-                st.rerun()
-        else:
-            pwd = st.text_input("Password", type="password", key="admin_pwd")
-            if st.button("Log in"):
-                if pwd == scrape_password:
-                    st.session_state.is_admin = True
-                    st.rerun()
-                else:
-                    st.error("Wrong password.")
-    else:
-        st.markdown("---")
-        st.caption("(No admin password set — Run scrape is available to everyone.)")
+    st.markdown("## About")
+    if is_using_sqlite_fallback():
+        st.warning("Local DB (Supabase unavailable). Data here won’t appear in the public app.")
+        st.caption("Run `python3 sync_local_to_supabase.py` from the project folder to sync.")
+    st.caption("Shapewear prices from Shapermint competitors (Spanx, SKIMS, Honeylove).")
     st.markdown("---")
-
-init_db()
+    scrape_password = _get_scrape_password()
+    with st.expander("Admin", expanded=False):
+        if scrape_password:
+            if st.session_state.is_admin:
+                st.success("Logged in.")
+                if st.button("Log out"):
+                    st.session_state.is_admin = False
+                    st.rerun()
+            else:
+                pwd = st.text_input("Password", type="password", key="admin_pwd")
+                if st.button("Log in"):
+                    if pwd == scrape_password:
+                        st.session_state.is_admin = True
+                        st.rerun()
+                    else:
+                        st.error("Wrong password.")
+            if st.session_state.is_admin:
+                st.markdown("---")
+                st.caption("Run a scrape to refresh prices.")
+                if st.button("Execute scrape"):
+                    with st.spinner("Scraping…"):
+                        try:
+                            result = run_all_scrapers(save=True)
+                            items = result["items"]
+                            products_updated = result["products_updated"]
+                            price_records = result["price_records_inserted"]
+                            per_brand = result["per_brand"]
+                            st.success(
+                                f"Done. **{len(items)}** items, **{products_updated}** products, **{price_records}** price records."
+                            )
+                            for brand, (count, err) in per_brand.items():
+                                if err:
+                                    st.warning(f"**{brand}:** {err}")
+                                else:
+                                    st.caption(f"**{brand}:** {count} items")
+                            if result.get("cloud_only_spanx"):
+                                st.info("Cloud run — only Spanx scraped. Run locally for SKIMS/Honeylove.")
+                        except Exception as e:
+                            st.error(f"Scrape failed: {e}")
+        else:
+            st.caption("Set **SCRAPE_PASSWORD** in secrets to enable updates.")
 
 # Tabs for main sections
-tab1, tab2, tab3 = st.tabs(["Current prices", "Price history", "Run scrape"])
+tab1, tab2 = st.tabs(["📊 Current prices", "📈 Price history"])
+
+import pandas as pd
 
 with tab1:
     st.header("Current prices")
     st.caption("Latest scraped price per product. Use filters to narrow down.")
     brands = get_brand_names()
     categories = get_categories()
+
     col1, col2 = st.columns(2)
     with col1:
-        filter_brand = st.selectbox(
-            "Filter by brand",
-            options=[None] + brands,
-            format_func=lambda x: "All brands" if x is None else x,
+        filter_brands = st.multiselect(
+            "Brands",
+            options=brands,
+            default=[],
+            key="ms_brands",
         )
     with col2:
-        filter_category = st.selectbox(
-            "Filter by category",
-            options=[None] + categories,
-            format_func=lambda x: "All categories" if x is None else x,
+        filter_categories = st.multiselect(
+            "Categories",
+            options=categories,
+            default=[],
+            key="ms_categories",
         )
-    rows = get_current_prices(
-        brand_name=filter_brand if filter_brand else None,
-        category=filter_category if filter_category else None,
+    search_query = st.text_input(
+        "Search by product name",
+        placeholder="Type to filter…",
+        key="search_input",
     )
+
+    # Filter pills and Clear all
+    active_filters = []
+    if filter_brands:
+        active_filters.append("Brands: " + ", ".join(filter_brands))
+    if filter_categories:
+        active_filters.append("Categories: " + ", ".join(filter_categories))
+    if search_query and search_query.strip():
+        active_filters.append("Search: '" + search_query.strip() + "'")
+    if active_filters:
+        pill_col, clear_col = st.columns([3, 1])
+        with pill_col:
+            st.caption("Active: " + "  |  ".join(active_filters))
+        with clear_col:
+            if st.button("Clear all"):
+                st.session_state.ms_brands = []
+                st.session_state.ms_categories = []
+                st.session_state.search_input = ""
+                st.rerun()
+
+    brand_names = filter_brands if filter_brands else None
+    category_names = filter_categories if filter_categories else None
+    rows = get_current_prices(brand_names=brand_names, category_names=category_names)
+
+    if search_query and search_query.strip():
+        q = search_query.strip().lower()
+        rows = [r for r in rows if q in (r.get("product_name") or "").lower()]
+
     if not rows:
-        st.info("No price data yet. Go to the **Run scrape** tab to fetch competitor prices.")
+        st.info("No price data yet. Use **Admin** in the sidebar to run a scrape.")
     else:
-        import pandas as pd
         df = pd.DataFrame(rows)
-        df["Last updated"] = df["scraped_at"].dt.strftime("%Y-%m-%d %H:%M")
-        display_df = df[["brand_name", "product_name", "category", "price", "currency", "Last updated"]]
+
+        # Global last scrape
+        last_scrape = get_last_scrape_at()
+        if last_scrape:
+            try:
+                ts = pd.Timestamp(last_scrape).strftime("%b %d, %H:%M")
+            except Exception:
+                ts = str(last_scrape)
+            st.caption(f"Last scrape: **{ts}**")
+
+        # KPI strip
+        min_price = df["price"].min()
+        max_price = df["price"].max()
+        count = len(df)
+        avg_by_brand = df.groupby("brand_name")["price"].mean().round(2)
+        kpi_parts = [f"**{b}** ${v:,.2f}" for b, v in avg_by_brand.items()]
+        kpi_str = " | ".join(kpi_parts) if kpi_parts else "—"
+        st.markdown(
+            f"Avg by brand: {kpi_str}  ·  "
+            f"Min **${min_price:,.2f}**  ·  Max **${max_price:,.2f}**  ·  "
+            f"**{count}** products"
+        )
+
+        # Sort dropdown
+        sort_col, sort_dir = st.columns(2)
+        with sort_col:
+            sort_by = st.selectbox(
+                "Sort by",
+                options=["price", "brand_name", "category", "scraped_at"],
+                format_func=lambda x: {"price": "Price", "brand_name": "Brand", "category": "Category", "scraped_at": "Last updated"}[x],
+                key="sort_by",
+            )
+        with sort_dir:
+            sort_asc = st.selectbox("Order", options=[True, False], format_func=lambda x: "Ascending" if x else "Descending", key="sort_asc")
+        df = df.sort_values(by=sort_by, ascending=sort_asc).reset_index(drop=True)
+
+        # Truncate product name for display; keep full for tooltip
+        max_name_len = 40
+        df["product_display"] = df["product_name"].apply(
+            lambda x: (x[:max_name_len] + "...") if x and len(str(x)) > max_name_len else (x or "")
+        )
+
+        # Format price with commas; build display df
+        df["price_fmt"] = df["price"].apply(lambda p: f"{p:,.2f}")
+        df["previous_fmt"] = df["previous_price"].apply(
+            lambda p: f"{p:,.2f}" if p is not None else "—"
+        )
+        df["change_fmt"] = df["change_pct"].apply(
+            lambda c: f"{c:+.1f}%" if c is not None else "—"
+        )
+
+        # Min/max in view for highlighting
+        view_min, view_max = df["price"].min(), df["price"].max()
+
+        display_df = df[["brand_name", "product_display", "category", "price_fmt", "previous_fmt", "change_fmt", "currency"]].copy()
         display_df = display_df.rename(columns={
             "brand_name": "Brand",
-            "product_name": "Product",
+            "product_display": "Product",
             "category": "Category",
-            "price": "Price",
+            "price_fmt": "Price",
+            "previous_fmt": "Previous price",
+            "change_fmt": "Change %",
             "currency": "Currency",
         })
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        def row_style(r):
+            p = df.loc[r.name, "price"]
+            if p == view_min:
+                return ["", "", "", "background-color: #d4edda;", "", "", ""]
+            if p == view_max:
+                return ["", "", "", "background-color: #f8d7da;", "", "", ""]
+            return [""] * 7
+
+        styled = display_df.style.apply(row_style, axis=1)
+
+        column_config = {
+            "Brand": st.column_config.TextColumn("Brand", width="small"),
+            "Product": st.column_config.TextColumn(
+                "Product",
+                width="medium",
+                help="Truncated; full name in exported CSV",
+            ),
+            "Category": st.column_config.TextColumn("Category", width="small"),
+            "Price": st.column_config.TextColumn("Price", width="small"),
+            "Previous price": st.column_config.TextColumn("Previous price", width="small"),
+            "Change %": st.column_config.TextColumn("Change %", width="small"),
+            "Currency": st.column_config.TextColumn("Currency", width="small"),
+        }
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config,
+            height=400,
+        )
+        # Export CSV
+        csv_bytes = df[["brand_name", "product_name", "category", "price", "previous_price", "change_pct", "currency"]].to_csv(index=False).encode()
+        st.download_button("Export CSV", data=csv_bytes, file_name="current_prices.csv", mime="text/csv", key="export_csv")
 
 with tab2:
     st.header("Price history")
     st.caption("Select one or more products to see how their price changed over time.")
     product_options = get_products_for_selector()
     if not product_options:
-        st.info("No products in the database yet. Run a scrape first.")
+        st.info("No products in the database yet. Use **Admin** in the sidebar to run a scrape.")
     else:
         selected = st.multiselect(
             "Choose products",
@@ -142,27 +295,3 @@ with tab2:
                 )
         else:
             st.info("Select at least one product to view history.")
-
-with tab3:
-    st.header("Run scrape now")
-    scrape_password = _get_scrape_password()
-    can_run_scrape = not scrape_password or st.session_state.is_admin
-    if not can_run_scrape:
-        st.info(
-            "Only the admin can update data. Enter the admin password in the **sidebar** to run a scrape."
-        )
-    else:
-        st.caption(
-            "Fetch current prices from Spanx, SKIMS, and Honeylove. "
-            "This may take a minute. New prices will be stored and shown in the other tabs."
-        )
-        if st.button("Execute scrape"):
-            with st.spinner("Scraping competitor sites…"):
-                try:
-                    items, products_updated, price_records = run_all_scrapers(save=True)
-                    st.success(
-                        f"Done. Processed **{len(items)}** items: "
-                        f"**{products_updated}** products updated, **{price_records}** price records saved."
-                    )
-                except Exception as e:
-                    st.error(f"Scrape failed: {e}")

@@ -42,17 +42,25 @@ class PriceHistory(Base):
 
 _engine = None
 _Session = None
+_using_sqlite_fallback = False  # True when Supabase was unreachable and we fell back to SQLite
 
 
 def get_engine():
-    global _engine
+    global _engine, _using_sqlite_fallback
     if _engine is None:
         if getattr(config, "DATABASE_URL", None):
             url = config.DATABASE_URL
-            # SQLAlchemy expects postgresql:// (not postgres://)
             if url.startswith("postgres://"):
                 url = "postgresql://" + url[11:]
-            _engine = create_engine(url, echo=False)
+            pg_engine = create_engine(url, echo=False)
+            try:
+                with pg_engine.connect() as conn:
+                    conn.close()
+                _engine = pg_engine
+            except Exception:
+                _using_sqlite_fallback = True
+                os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
+                _engine = create_engine(f"sqlite:///{config.DB_PATH}", echo=False)
         else:
             os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
             _engine = create_engine(f"sqlite:///{config.DB_PATH}", echo=False)
@@ -70,3 +78,8 @@ def init_db():
     """Create all tables if they do not exist."""
     engine = get_engine()
     Base.metadata.create_all(engine)
+
+
+def is_using_sqlite_fallback():
+    """True if Supabase was unreachable and we fell back to local SQLite."""
+    return _using_sqlite_fallback

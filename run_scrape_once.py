@@ -17,5 +17,14 @@ from scrapers import run_all_scrapers
 
 if __name__ == "__main__":
     init_db()
-    items, products_updated, price_records = run_all_scrapers(save=True)
+    result = run_all_scrapers(save=True)
+    items = result["items"]
+    products_updated = result["products_updated"]
+    price_records = result["price_records_inserted"]
+    per_brand = result["per_brand"]
     print(f"Done. Items: {len(items)}, products updated: {products_updated}, price records: {price_records}")
+    for brand, (count, err) in per_brand.items():
+        if err:
+            print(f"  {brand}: {err}")
+        else:
+            print(f"  {brand}: {count} items")

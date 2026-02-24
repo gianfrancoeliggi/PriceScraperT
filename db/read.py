@@ -1,11 +1,25 @@
 """Read queries for the Streamlit UI."""
+from sqlalchemy import func
+
 from db.models import Product, PriceHistory, Brand, get_session, init_db
 
 
-def get_current_prices(brand_name=None, category=None):
+def get_last_scrape_at():
+    """Return the most recent scraped_at timestamp across all price_history, or None."""
+    init_db()
+    session = get_session()
+    try:
+        row = session.query(func.max(PriceHistory.scraped_at)).scalar()
+        return row
+    finally:
+        session.close()
+
+
+def get_current_prices(brand_names=None, category_names=None):
     """
-    Return a list of dicts with: brand_name, product_name, category, price, currency, scraped_at, product_id, url.
-    Optional filters: brand_name, category.
+    Return a list of dicts with: brand_name, product_name, category, price, currency,
+    scraped_at, product_id, url, previous_price, change_pct.
+    Optional filters: brand_names (list), category_names (list). None = no filter.
     """
     init_db()
     session = get_session()
@@ -21,30 +35,41 @@ def get_current_prices(brand_name=None, category=None):
             .join(Product, Product.brand_id == Brand.id)
             .filter(Brand.active == True)
         )
-        if brand_name:
-            q = q.filter(Brand.name == brand_name)
-        if category:
-            q = q.filter(Product.category == category)
+        if brand_names:
+            q = q.filter(Brand.name.in_(brand_names))
+        if category_names:
+            q = q.filter(Product.category.in_(category_names))
         products = q.all()
         result = []
         for row in products:
-            latest = (
+            histories = (
                 session.query(PriceHistory)
                 .filter(PriceHistory.product_id == row.product_id)
                 .order_by(PriceHistory.scraped_at.desc())
-                .first()
+                .limit(2)
+                .all()
             )
-            if latest:
-                result.append({
-                    "brand_name": row.brand_name,
-                    "product_name": row.product_name,
-                    "category": row.category or "",
-                    "price": float(latest.price),
-                    "currency": latest.currency,
-                    "scraped_at": latest.scraped_at,
-                    "product_id": row.product_id,
-                    "url": row.url,
-                })
+            if not histories:
+                continue
+            latest = histories[0]
+            previous_price = float(histories[1].price) if len(histories) > 1 else None
+            change_pct = None
+            if previous_price is not None and previous_price != 0:
+                change_pct = round(
+                    (float(latest.price) - previous_price) / previous_price * 100, 1
+                )
+            result.append({
+                "brand_name": row.brand_name,
+                "product_name": row.product_name,
+                "category": row.category or "",
+                "price": float(latest.price),
+                "currency": latest.currency,
+                "scraped_at": latest.scraped_at,
+                "product_id": row.product_id,
+                "url": row.url,
+                "previous_price": previous_price,
+                "change_pct": change_pct,
+            })
         return result
     finally:
         session.close()
