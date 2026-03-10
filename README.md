@@ -1,6 +1,6 @@
 # Shapermint competitor price scraper
 
-Scrapes shapewear prices from Spanx, SKIMS, and Honeylove, stores them in Supabase, and shows them in a shared Streamlit dashboard (current prices, filters, price history charts).
+Scrapes shapewear prices from **Shapermint (Amazon)** and competitors (Spanx, SKIMS, Honeylove), stores them in Supabase, and shows them in a shared Streamlit dashboard (current prices, filters, price history charts).
 
 ---
 
@@ -9,9 +9,10 @@ Scrapes shapewear prices from Spanx, SKIMS, and Honeylove, stores them in Supaba
 ```
 Your Mac
   └── run_scrape_once.py
-        ├── Spanx  → requests + BeautifulSoup
-        ├── SKIMS  → Playwright (headless Chromium)
-        └── Honeylove → Playwright (headless Chromium)
+        ├── Spanx       → requests + BeautifulSoup
+        ├── SKIMS       → Playwright (headless Chromium)
+        ├── Honeylove   → Playwright (headless Chromium)
+        └── Shapermint  → Playwright (Amazon store pages)
               │
               ▼
          Supabase (PostgreSQL, cloud)
@@ -35,7 +36,7 @@ Open a terminal in the project folder and run:
 python3 run_scrape_once.py
 ```
 
-That's it. All 3 brands are scraped and results go straight to Supabase.
+That's it. All 4 brands (Shapermint on Amazon, Spanx, SKIMS, Honeylove) are scraped and results go straight to Supabase.
 
 ---
 
@@ -104,7 +105,7 @@ DATABASE_URL = 'postgresql://postgres.yiybgogqeehgrrbhrgti:PASSWORD@aws-1-us-eas
 
 ## Notes
 
-- **Spanx** uses `requests` + BeautifulSoup. **SKIMS** and **Honeylove** use Playwright (headless Chromium) because their pages are JS-rendered.
-- Playwright + Chromium must be installed locally to scrape SKIMS and Honeylove.
-- On Streamlit Cloud, only Spanx can be scraped via the "Run scrape" tab (no Playwright). Always scrape locally.
+- **Spanx** uses `requests` + BeautifulSoup. **SKIMS**, **Honeylove**, and **Shapermint (Amazon)** use Playwright (headless Chromium) because their pages are JS-rendered.
+- Playwright + Chromium must be installed locally to scrape SKIMS, Honeylove, and Shapermint Amazon.
+- On Streamlit Cloud, only Spanx can be scraped via the "Run scrape" tab (no Playwright). Always scrape locally for full data.
 - Respect each site's `robots.txt`. This tool is for internal team use only.

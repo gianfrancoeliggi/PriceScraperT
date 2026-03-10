@@ -5,5 +5,7 @@ from scrapers.base import scrape_brand, run_all_scrapers
 from scrapers import spanx  # noqa: F401
 from scrapers import skims  # noqa: F401
 from scrapers import honeylove  # noqa: F401
+from scrapers import shapermint_amazon  # noqa: F401
+from scrapers import shapermint_store  # noqa: F401
 
 __all__ = ["scrape_brand", "run_all_scrapers"]

@@ -17,7 +17,7 @@ USER_AGENT = (
 )
 
 # Brand keys (used by orchestrator)
-BRAND_KEYS = ["spanx", "skims", "honeylove"]
+BRAND_KEYS = ["spanx", "skims", "honeylove", "shapermint", "shapermint_store"]
 
 # Optional: collection URLs per brand (can be overridden in each scraper module)
 SPANX_COLLECTIONS = [

@@ -22,6 +22,7 @@ from db.read import (
     get_products_for_selector,
     get_brand_names,
     get_categories,
+    get_shapermint_comparison,
 )
 from scrapers import run_all_scrapers
 
@@ -49,7 +50,10 @@ with st.sidebar:
     if is_using_sqlite_fallback():
         st.warning("Local DB (Supabase unavailable). Data here won’t appear in the public app.")
         st.caption("Run `python3 sync_local_to_supabase.py` from the project folder to sync.")
-    st.caption("Shapewear prices from Shapermint competitors (Spanx, SKIMS, Honeylove).")
+    st.caption(
+        "**Current prices** shows competitors only (Spanx, SKIMS, Honeylove). "
+        "Use the **Shapermint: Amazon vs Store** tab to compare Shapermint Amazon vs Shapermint Store by category."
+    )
     st.markdown("---")
     scrape_password = _get_scrape_password()
     with st.expander("Admin", expanded=False):
@@ -94,7 +98,11 @@ with st.sidebar:
             st.caption("Set **SCRAPE_PASSWORD** in secrets to enable updates.")
 
 # Tabs for main sections
-tab1, tab2 = st.tabs(["📊 Current prices", "📈 Price history"])
+tab1, tab2, tab3 = st.tabs([
+    "📊 Current prices",
+    "🔄 Shapermint: Amazon vs Store",
+    "📈 Price history",
+])
 
 import pandas as pd
 
@@ -144,7 +152,8 @@ with tab1:
                 st.session_state.search_input = ""
                 st.rerun()
 
-    brand_names = filter_brands if filter_brands else None
+    competitor_brands = [b for b in brands if b not in ("Shapermint Amazon", "Shapermint Store")]
+    brand_names = filter_brands if filter_brands else competitor_brands
     category_names = filter_categories if filter_categories else None
     rows = get_current_prices(brand_names=brand_names, category_names=category_names)
 
@@ -255,7 +264,70 @@ with tab1:
         csv_bytes = df[["brand_name", "product_name", "category", "price", "previous_price", "change_pct", "currency"]].to_csv(index=False).encode()
         st.download_button("Export CSV", data=csv_bytes, file_name="current_prices.csv", mime="text/csv", key="export_csv")
 
+# Category order for Amazon vs Store comparison
+SHAPERMINT_CATEGORY_ORDER = [
+    "EBRA", "STBRA", "CAMI", "Sweetheart BRA", "Tank CAMI", "BRAHE", "BSS",
+]
+
 with tab2:
+    st.header("Shapermint: Amazon vs Store")
+    st.caption("Compare Shapermint Amazon and Shapermint Store prices by category.")
+    comparison = get_shapermint_comparison()
+    if not comparison:
+        st.info("No Shapermint Amazon or Store data yet. Run a scrape for **shapermint** and **shapermint_store** in Admin.")
+    else:
+        df_comp = pd.DataFrame(comparison)
+        # Build a summary by category: Amazon (min–max or list), Store 1 unit, Store 2 pack
+        amazon_by_cat = {}
+        store_1_by_cat = {}
+        store_2_by_cat = {}
+        for _, row in df_comp.iterrows():
+            cat = row.get("category") or ""
+            brand = row.get("brand_name") or ""
+            price = row.get("price")
+            name = row.get("product_name") or ""
+            if "Amazon" in brand:
+                if cat not in amazon_by_cat:
+                    amazon_by_cat[cat] = []
+                amazon_by_cat[cat].append(price)
+            elif "Store" in brand:
+                if "2 Pack" in name or "2 pack" in name:
+                    store_2_by_cat[cat] = price
+                else:
+                    store_1_by_cat[cat] = price
+        rows_comp = []
+        for cat in SHAPERMINT_CATEGORY_ORDER:
+            if cat not in amazon_by_cat and cat not in store_1_by_cat and cat not in store_2_by_cat:
+                continue
+            am_prices = amazon_by_cat.get(cat) or []
+            am_str = f"${min(am_prices):,.2f} – ${max(am_prices):,.2f}" if am_prices else "—"
+            if len(am_prices) == 1:
+                am_str = f"${am_prices[0]:,.2f}"
+            rows_comp.append({
+                "Category": cat,
+                "Amazon": am_str,
+                "Store 1 unit": f"${store_1_by_cat[cat]:,.2f}" if store_1_by_cat.get(cat) is not None else "—",
+                "Store 2 pack": f"${store_2_by_cat[cat]:,.2f}" if store_2_by_cat.get(cat) is not None else "—",
+            })
+        if rows_comp:
+            st.dataframe(
+                pd.DataFrame(rows_comp),
+                use_container_width=True,
+                hide_index=True,
+            )
+        st.subheader("All products")
+        display_comp = df_comp[["brand_name", "product_name", "category", "price", "currency"]].copy()
+        display_comp = display_comp.rename(columns={
+            "brand_name": "Brand",
+            "product_name": "Product",
+            "category": "Category",
+            "price": "Price",
+            "currency": "Currency",
+        })
+        display_comp["Price"] = display_comp["Price"].apply(lambda p: f"{p:,.2f}")
+        st.dataframe(display_comp, use_container_width=True, hide_index=True)
+
+with tab3:
     st.header("Price history")
     st.caption("Select one or more products to see how their price changed over time.")
     product_options = get_products_for_selector()

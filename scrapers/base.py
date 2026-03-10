@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 _REGISTRY: dict[str, Any] = {}
 
 # Brands that need Playwright (headless browser); on Streamlit Cloud they won't run
-_PLAYWRIGHT_BRANDS = {"skims", "honeylove"}
+_PLAYWRIGHT_BRANDS = {"skims", "honeylove", "shapermint", "shapermint_store"}
 
 
 def _is_playwright_available() -> bool:

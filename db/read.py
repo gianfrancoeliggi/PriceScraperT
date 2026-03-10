@@ -132,6 +132,16 @@ def get_price_history(product_ids):
         session.close()
 
 
+def get_shapermint_comparison():
+    """
+    Return current prices for Shapermint Amazon and Shapermint Store only,
+    for the "Amazon vs Store" comparison tab. Same shape as get_current_prices.
+    """
+    return get_current_prices(
+        brand_names=["Shapermint Amazon", "Shapermint Store"]
+    )
+
+
 def get_brand_names():
     """Return sorted list of brand names that have products."""
     init_db()
