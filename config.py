@@ -12,6 +12,8 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Scraping
 REQUEST_DELAY_SECONDS = 1.5
+# Use screenshot + AI vision to extract prices (avoids "Save $17" etc). Requires OPENAI_API_KEY.
+USE_VISION_PRICES = os.environ.get("USE_VISION_PRICES", "").strip().lower() in ("1", "true", "yes")
 USER_AGENT = (
     "ShapermintPriceScraper/1.0 (+https://github.com/shapermint; internal use)"
 )

@@ -1,7 +1,7 @@
 """Common scraper interface and orchestrator."""
 import re
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import config
 
@@ -91,25 +91,22 @@ def scrape_brand(brand_key: str) -> list[dict]:
     return fn()
 
 
-def run_all_scrapers(save: bool = True) -> dict:
+def run_all_scrapers(save: bool = True, only_brands: Optional[list[str]] = None) -> dict:
     """
-    Run all registered scrapers, optionally persist to DB.
-    On cloud (no Playwright), only Spanx runs; SKIMS and Honeylove are skipped.
+    Run registered scrapers, optionally persist to DB.
+    If only_brands is set (e.g. ["shapermint"]), run only those; otherwise run config.BRAND_KEYS.
+    Playwright brands are always attempted; if browser is unavailable (e.g. on Streamlit Cloud),
+    they fail with a clear error instead of being skipped upfront.
     Returns dict with: items, products_updated, price_records_inserted, per_brand, cloud_only_spanx.
     """
     all_items: list[dict] = []
     per_brand: dict[str, tuple[int, Any]] = {}  # brand -> (count, error_message or None)
-    playwright_ok = _is_playwright_available()
     cloud_only_spanx = False
-    for key in config.BRAND_KEYS:
+    keys_to_run = only_brands if only_brands is not None else config.BRAND_KEYS
+    for key in keys_to_run:
         if key not in _REGISTRY:
             logger.warning("No scraper registered for brand %s, skipping", key)
             per_brand[key] = (0, "Not registered")
-            continue
-        if key in _PLAYWRIGHT_BRANDS and not playwright_ok:
-            per_brand[key] = (0, "Playwright not available (run locally for this brand)")
-            logger.warning("Skipping %s: Playwright not available", key)
-            cloud_only_spanx = True
             continue
         try:
             items = scrape_brand(key)
@@ -120,6 +117,8 @@ def run_all_scrapers(save: bool = True) -> dict:
             err_msg = str(e)
             per_brand[key] = (0, err_msg)
             logger.exception("Scraper %s failed: %s", key, e)
+            if key in _PLAYWRIGHT_BRANDS:
+                cloud_only_spanx = True
     products_updated = 0
     price_records_inserted = 0
     if save and all_items:

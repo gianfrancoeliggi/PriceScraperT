@@ -3,9 +3,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from db.models import Brand, Product, PriceHistory, get_session, init_db
+from db.read import AMAZON_DISPLAY_PRICE_MIN, AMAZON_DISPLAY_PRICE_MAX
 
 
 def _get_or_create_brand(session: Session, name: str, base_url: Optional[str] = None) -> Brand:
@@ -78,6 +80,41 @@ def save_scrape_results(items: list[dict]) -> tuple[int, int]:
                 price_records_inserted += 1
         session.commit()
         return products_updated, price_records_inserted
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def delete_bogus_amazon_price_history() -> int:
+    """
+    Delete PriceHistory rows for Shapermint Amazon where price is outside 5–500 USD.
+    Returns number of rows deleted. Run once to clean old bogus data.
+    """
+    init_db()
+    session = get_session()
+    try:
+        brand = session.query(Brand).filter(Brand.name == "Shapermint Amazon").first()
+        if not brand:
+            return 0
+        subq = session.query(Product.id).filter(Product.brand_id == brand.id)
+        to_delete = (
+            session.query(PriceHistory)
+            .filter(
+                PriceHistory.product_id.in_(subq),
+                or_(
+                    PriceHistory.price < AMAZON_DISPLAY_PRICE_MIN,
+                    PriceHistory.price > AMAZON_DISPLAY_PRICE_MAX,
+                ),
+            )
+            .all()
+        )
+        n = len(to_delete)
+        for row in to_delete:
+            session.delete(row)
+        session.commit()
+        return n
     except Exception:
         session.rollback()
         raise

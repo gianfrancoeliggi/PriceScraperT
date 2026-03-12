@@ -7,7 +7,7 @@ import streamlit as st
 
 # So config and db use cloud DB when deployed (Streamlit Secrets → os.environ)
 try:
-    for key in ("DATABASE_URL", "SCRAPE_PASSWORD"):
+    for key in ("DATABASE_URL", "SCRAPE_PASSWORD", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "USE_VISION_PRICES"):
         v = getattr(st.secrets, key, None) or (st.secrets.get(key) if hasattr(st.secrets, "get") else None)
         if v:
             os.environ[key] = str(v)
@@ -23,7 +23,9 @@ from db.read import (
     get_brand_names,
     get_categories,
     get_shapermint_comparison,
+    get_shapermint_price_history_for_category,
 )
+from db.write import delete_bogus_amazon_price_history
 from scrapers import run_all_scrapers
 
 st.set_page_config(
@@ -91,9 +93,19 @@ with st.sidebar:
                                 else:
                                     st.caption(f"**{brand}:** {count} items")
                             if result.get("cloud_only_spanx"):
-                                st.info("Cloud run — only Spanx scraped. Run locally for SKIMS/Honeylove.")
+                                st.info(
+                                    "Cloud run — only Spanx scraped. "
+                                    "Run the app locally for SKIMS, Honeylove, Shapermint (Amazon), and Shapermint Store."
+                                )
                         except Exception as e:
                             st.error(f"Scrape failed: {e}")
+                st.caption("Remove old bogus Amazon price records (e.g. $56,615) from the database.")
+                if st.button("Clean bogus Amazon prices"):
+                    try:
+                        n = delete_bogus_amazon_price_history()
+                        st.success(f"Deleted **{n}** bogus Amazon price record(s). Refresh the comparison tab.")
+                    except Exception as e:
+                        st.error(f"Cleanup failed: {e}")
         else:
             st.caption("Set **SCRAPE_PASSWORD** in secrets to enable updates.")
 
@@ -268,13 +280,20 @@ with tab1:
 SHAPERMINT_CATEGORY_ORDER = [
     "EBRA", "STBRA", "CAMI", "Sweetheart BRA", "Tank CAMI", "BRAHE", "BSS",
 ]
+# Ignore bogus Amazon prices (old scrape bugs / wrong locale); same range as scraper
+_AMAZON_PRICE_MIN, _AMAZON_PRICE_MAX = 5.0, 500.0
 
 with tab2:
     st.header("Shapermint: Amazon vs Store")
     st.caption("Compare Shapermint Amazon and Shapermint Store prices by category.")
     comparison = get_shapermint_comparison()
     if not comparison:
-        st.info("No Shapermint Amazon or Store data yet. Run a scrape for **shapermint** and **shapermint_store** in Admin.")
+        st.info(
+            "No Shapermint Amazon or Store data yet. "
+            "**Shapermint** and **shapermint_store** use Playwright and don't run on Streamlit Cloud. "
+            "Run the app locally (`streamlit run app.py`), open **Admin** → **Execute scrape**, then run the scrape. "
+            "Data is saved to the same database, so it will appear here and on the deployed app."
+        )
     else:
         df_comp = pd.DataFrame(comparison)
         # Build a summary by category: Amazon (min–max or list), Store 1 unit, Store 2 pack
@@ -289,7 +308,8 @@ with tab2:
             if "Amazon" in brand:
                 if cat not in amazon_by_cat:
                     amazon_by_cat[cat] = []
-                amazon_by_cat[cat].append(price)
+                if price is not None and _AMAZON_PRICE_MIN <= float(price) <= _AMAZON_PRICE_MAX:
+                    amazon_by_cat[cat].append(float(price))
             elif "Store" in brand:
                 if "2 Pack" in name or "2 pack" in name:
                     store_2_by_cat[cat] = price
@@ -316,16 +336,33 @@ with tab2:
                 hide_index=True,
             )
         st.subheader("All products")
-        display_comp = df_comp[["brand_name", "product_name", "category", "price", "currency"]].copy()
+        # Hide Amazon rows with bogus price so table matches summary
+        def _valid_price(row):
+            p = row.get("price")
+            if p is None:
+                return False
+            if "Amazon" in (row.get("brand_name") or ""):
+                return _AMAZON_PRICE_MIN <= float(p) <= _AMAZON_PRICE_MAX
+            return True
+        display_comp = df_comp[["brand_name", "product_name", "category", "price", "currency", "scraped_at"]].copy()
+        display_comp = display_comp[display_comp.apply(_valid_price, axis=1)]
+        display_comp["scraped_at"] = pd.to_datetime(display_comp["scraped_at"], errors="coerce")
         display_comp = display_comp.rename(columns={
             "brand_name": "Brand",
             "product_name": "Product",
             "category": "Category",
             "price": "Price",
             "currency": "Currency",
+            "scraped_at": "Scraped at",
         })
         display_comp["Price"] = display_comp["Price"].apply(lambda p: f"{p:,.2f}")
-        st.dataframe(display_comp, use_container_width=True, hide_index=True)
+        cols_display = ["Brand", "Product", "Category", "Price", "Currency", "Scraped at"]
+        st.dataframe(
+            display_comp[cols_display],
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Scraped at": st.column_config.DatetimeColumn("Scraped at", format="YYYY-MM-DD HH:mm")},
+        )
 
 with tab3:
     st.header("Price history")
@@ -367,3 +404,52 @@ with tab3:
                 )
         else:
             st.info("Select at least one product to view history.")
+
+    st.subheader("Shapermint: Amazon vs Store over time")
+    st.caption("Pick a category to see price history for Amazon vs Store (1 unit and 2 pack).")
+    shapermint_cats = [c for c in SHAPERMINT_CATEGORY_ORDER if c in (get_categories() or [])]
+    if not shapermint_cats:
+        st.info("No Shapermint Amazon or Store data yet. Run those scrapers first.")
+    else:
+        comp_cat = st.selectbox(
+            "Category",
+            options=shapermint_cats,
+            key="shapermint_history_cat",
+        )
+        if comp_cat:
+            hist_rows = get_shapermint_price_history_for_category(comp_cat)
+            if not hist_rows:
+                st.warning(f"No price history for category **{comp_cat}**.")
+            else:
+                df_h = pd.DataFrame(hist_rows)
+                df_h["scraped_at"] = pd.to_datetime(df_h["scraped_at"])
+                # Filter bogus Amazon prices for the chart
+                def _ok(row):
+                    if "Amazon" in (row.get("brand_name") or ""):
+                        p = row.get("price")
+                        return p is not None and _AMAZON_PRICE_MIN <= float(p) <= _AMAZON_PRICE_MAX
+                    return True
+                df_h = df_h[df_h.apply(_ok, axis=1)]
+                # Build series: Amazon (min per scraped_at), Store 1 unit, Store 2 pack
+                by_ts = df_h.groupby("scraped_at")
+                chart_data = []
+                for ts, grp in by_ts:
+                    row = {"scraped_at": ts}
+                    am = grp[grp["brand_name"] == "Shapermint Amazon"]
+                    if not am.empty:
+                        row["Amazon"] = am["price"].min()
+                    store = grp[grp["brand_name"] == "Shapermint Store"]
+                    store_1 = store[~store["product_name"].str.contains("2 [Pp]ack", na=False)]
+                    store_2 = store[store["product_name"].str.contains("2 [Pp]ack", na=False)]
+                    if not store_1.empty:
+                        row["Store 1 unit"] = store_1["price"].iloc[0]
+                    if not store_2.empty:
+                        row["Store 2 pack"] = store_2["price"].iloc[0]
+                    chart_data.append(row)
+                if chart_data:
+                    df_chart = pd.DataFrame(chart_data).set_index("scraped_at").sort_index()
+                    df_chart = df_chart.ffill()
+                    st.line_chart(df_chart, use_container_width=True)
+                    st.dataframe(df_chart.reset_index(), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("No data to plot after filtering.")

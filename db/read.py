@@ -132,14 +132,29 @@ def get_price_history(product_ids):
         session.close()
 
 
+# Valid Amazon price range (bogus scraped values outside this are excluded everywhere)
+AMAZON_DISPLAY_PRICE_MIN, AMAZON_DISPLAY_PRICE_MAX = 5.0, 500.0
+
+
 def get_shapermint_comparison():
     """
     Return current prices for Shapermint Amazon and Shapermint Store only,
     for the "Amazon vs Store" comparison tab. Same shape as get_current_prices.
+    Amazon rows with price outside 5–500 USD are excluded so the UI never shows bogus values.
     """
-    return get_current_prices(
+    rows = get_current_prices(
         brand_names=["Shapermint Amazon", "Shapermint Store"]
     )
+    out = []
+    for r in rows:
+        brand = r.get("brand_name") or ""
+        price = r.get("price")
+        if "Amazon" in brand and price is not None:
+            p = float(price)
+            if p < AMAZON_DISPLAY_PRICE_MIN or p > AMAZON_DISPLAY_PRICE_MAX:
+                continue
+        out.append(r)
+    return out
 
 
 def get_brand_names():
@@ -165,5 +180,43 @@ def get_categories():
             .all()
         )
         return sorted(r[0] for r in rows)
+    finally:
+        session.close()
+
+
+def get_shapermint_price_history_for_category(category: str):
+    """
+    Return all price history rows for Shapermint Amazon and Shapermint Store
+    for the given category. Used for the Amazon vs Store over-time chart.
+    Returns list of dicts: scraped_at, brand_name, product_name, category, price.
+    """
+    init_db()
+    session = get_session()
+    try:
+        rows = (
+            session.query(
+                PriceHistory.scraped_at,
+                Brand.name.label("brand_name"),
+                Product.name.label("product_name"),
+                Product.category.label("category"),
+                PriceHistory.price,
+            )
+            .join(Product, Product.id == PriceHistory.product_id)
+            .join(Brand, Brand.id == Product.brand_id)
+            .filter(Brand.name.in_(["Shapermint Amazon", "Shapermint Store"]))
+            .filter(Product.category == category)
+            .order_by(PriceHistory.scraped_at)
+            .all()
+        )
+        return [
+            {
+                "scraped_at": r.scraped_at,
+                "brand_name": r.brand_name,
+                "product_name": r.product_name,
+                "category": r.category,
+                "price": float(r.price),
+            }
+            for r in rows
+        ]
     finally:
         session.close()
