@@ -315,6 +315,8 @@ with tab2:
                     store_2_by_cat[cat] = price
                 else:
                     store_1_by_cat[cat] = price
+        # Amazon pack: price > 40% above min is treated as 2-unit pack
+        _AMAZON_PACK_THRESHOLD = 1.40  # price >= min * 1.40 → pack
         rows_comp = []
         for cat in SHAPERMINT_CATEGORY_ORDER:
             if cat not in amazon_by_cat and cat not in store_1_by_cat and cat not in store_2_by_cat:
@@ -323,9 +325,15 @@ with tab2:
             am_str = f"${min(am_prices):,.2f} – ${max(am_prices):,.2f}" if am_prices else "—"
             if len(am_prices) == 1:
                 am_str = f"${am_prices[0]:,.2f}"
+            min_am = min(am_prices) if am_prices else None
+            am_pack = None
+            if min_am is not None and am_prices:
+                pack_candidates = [p for p in am_prices if p >= min_am * _AMAZON_PACK_THRESHOLD]
+                am_pack = min(pack_candidates) if pack_candidates else None
             rows_comp.append({
                 "Category": cat,
                 "Amazon": am_str,
+                "Amazon Pack": f"${am_pack:,.2f}" if am_pack is not None else "—",
                 "Store 1 unit": f"${store_1_by_cat[cat]:,.2f}" if store_1_by_cat.get(cat) is not None else "—",
                 "Store 2 pack": f"${store_2_by_cat[cat]:,.2f}" if store_2_by_cat.get(cat) is not None else "—",
             })
@@ -363,6 +371,53 @@ with tab2:
             hide_index=True,
             column_config={"Scraped at": st.column_config.DatetimeColumn("Scraped at", format="YYYY-MM-DD HH:mm")},
         )
+
+        st.subheader("Price history: Amazon vs Store")
+        st.caption("Pick a category to see price over time for Amazon vs Store (1 unit and 2 pack).")
+        shapermint_cats = [c for c in SHAPERMINT_CATEGORY_ORDER if c in (get_categories() or [])]
+        if not shapermint_cats:
+            st.info("No Shapermint Amazon or Store data yet. Run those scrapers first.")
+        else:
+            comp_cat = st.selectbox(
+                "Category",
+                options=shapermint_cats,
+                key="shapermint_history_cat",
+            )
+            if comp_cat:
+                hist_rows = get_shapermint_price_history_for_category(comp_cat)
+                if not hist_rows:
+                    st.warning(f"No price history for category **{comp_cat}**.")
+                else:
+                    df_h = pd.DataFrame(hist_rows)
+                    df_h["scraped_at"] = pd.to_datetime(df_h["scraped_at"])
+                    def _ok(row):
+                        if "Amazon" in (row.get("brand_name") or ""):
+                            p = row.get("price")
+                            return p is not None and _AMAZON_PRICE_MIN <= float(p) <= _AMAZON_PRICE_MAX
+                        return True
+                    df_h = df_h[df_h.apply(_ok, axis=1)]
+                    by_ts = df_h.groupby("scraped_at")
+                    chart_data = []
+                    for ts, grp in by_ts:
+                        row = {"scraped_at": ts}
+                        am = grp[grp["brand_name"] == "Shapermint Amazon"]
+                        if not am.empty:
+                            row["Amazon"] = am["price"].min()
+                        store = grp[grp["brand_name"] == "Shapermint Store"]
+                        store_1 = store[~store["product_name"].str.contains("2 [Pp]ack", na=False)]
+                        store_2 = store[store["product_name"].str.contains("2 [Pp]ack", na=False)]
+                        if not store_1.empty:
+                            row["Store 1 unit"] = store_1["price"].iloc[0]
+                        if not store_2.empty:
+                            row["Store 2 pack"] = store_2["price"].iloc[0]
+                        chart_data.append(row)
+                    if chart_data:
+                        df_chart = pd.DataFrame(chart_data).set_index("scraped_at").sort_index()
+                        df_chart = df_chart.ffill()
+                        st.line_chart(df_chart, use_container_width=True)
+                        st.dataframe(df_chart.reset_index(), use_container_width=True, hide_index=True)
+                    else:
+                        st.warning("No data to plot after filtering.")
 
 with tab3:
     st.header("Price history")
@@ -404,52 +459,3 @@ with tab3:
                 )
         else:
             st.info("Select at least one product to view history.")
-
-    st.subheader("Shapermint: Amazon vs Store over time")
-    st.caption("Pick a category to see price history for Amazon vs Store (1 unit and 2 pack).")
-    shapermint_cats = [c for c in SHAPERMINT_CATEGORY_ORDER if c in (get_categories() or [])]
-    if not shapermint_cats:
-        st.info("No Shapermint Amazon or Store data yet. Run those scrapers first.")
-    else:
-        comp_cat = st.selectbox(
-            "Category",
-            options=shapermint_cats,
-            key="shapermint_history_cat",
-        )
-        if comp_cat:
-            hist_rows = get_shapermint_price_history_for_category(comp_cat)
-            if not hist_rows:
-                st.warning(f"No price history for category **{comp_cat}**.")
-            else:
-                df_h = pd.DataFrame(hist_rows)
-                df_h["scraped_at"] = pd.to_datetime(df_h["scraped_at"])
-                # Filter bogus Amazon prices for the chart
-                def _ok(row):
-                    if "Amazon" in (row.get("brand_name") or ""):
-                        p = row.get("price")
-                        return p is not None and _AMAZON_PRICE_MIN <= float(p) <= _AMAZON_PRICE_MAX
-                    return True
-                df_h = df_h[df_h.apply(_ok, axis=1)]
-                # Build series: Amazon (min per scraped_at), Store 1 unit, Store 2 pack
-                by_ts = df_h.groupby("scraped_at")
-                chart_data = []
-                for ts, grp in by_ts:
-                    row = {"scraped_at": ts}
-                    am = grp[grp["brand_name"] == "Shapermint Amazon"]
-                    if not am.empty:
-                        row["Amazon"] = am["price"].min()
-                    store = grp[grp["brand_name"] == "Shapermint Store"]
-                    store_1 = store[~store["product_name"].str.contains("2 [Pp]ack", na=False)]
-                    store_2 = store[store["product_name"].str.contains("2 [Pp]ack", na=False)]
-                    if not store_1.empty:
-                        row["Store 1 unit"] = store_1["price"].iloc[0]
-                    if not store_2.empty:
-                        row["Store 2 pack"] = store_2["price"].iloc[0]
-                    chart_data.append(row)
-                if chart_data:
-                    df_chart = pd.DataFrame(chart_data).set_index("scraped_at").sort_index()
-                    df_chart = df_chart.ffill()
-                    st.line_chart(df_chart, use_container_width=True)
-                    st.dataframe(df_chart.reset_index(), use_container_width=True, hide_index=True)
-                else:
-                    st.warning("No data to plot after filtering.")
